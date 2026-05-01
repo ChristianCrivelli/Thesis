@@ -2,7 +2,6 @@ import pandas as pd
 import networkx as nx
 import folium
 from functions import build_graph, get_path_metrics
-from dijkstra import dijkstra as run_custom_dijkstra
 
 # 1. Define the trips to analyze
 trips = {

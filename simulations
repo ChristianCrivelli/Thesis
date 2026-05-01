@@ -1,0 +1,93 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Import your existing logic
+from functions import data, get_iso_emission_rate
+
+def simulate_trip_profiles(trip_id, n_profiles=5):
+    print(f"Simulating {n_profiles} profiles for trip: {trip_id[:20]}...")
+    
+    # 1. Load and prep the single trip
+    trip_df = data[data['trip'] == trip_id].sort_values('Time[ms]').copy()
+    
+    # 2. Calculate distances between consecutive GPS points
+    # We use shift() to get the next row's coordinates
+    trip_df['next_lat'] = trip_df['Latitude'].shift(-1)
+    trip_df['next_lon'] = trip_df['Longitude'].shift(-1)
+    
+    # Euclidean distance proxy (matching your build_graph logic)
+    trip_df['dist_meters'] = np.sqrt(
+        (trip_df['Latitude'] - trip_df['next_lat'])**2 + 
+        (trip_df['Longitude'] - trip_df['next_lon'])**2
+    ) * 111320
+    
+    # Drop the last row since it has no "next" destination
+    trip_df = trip_df.dropna(subset=['dist_meters'])
+    
+    # Get the emission group if it exists, otherwise default to 'low'
+    emission_group = trip_df['emission_group'].iloc[0] if 'emission_group' in trip_df.columns else 'low'
+
+    # 3. Simulate n profiles
+    results = []
+    
+    # alphas will range from 0.0 (Eco) to 1.0 (Fast)
+    alphas = np.linspace(0, 1, n_profiles)
+    
+    for i, alpha in enumerate(alphas):
+        # --- DEFINE THE BOUNDARIES ---
+        # ECO: Capped at 12 m/s (~43 km/h) to promote smooth driving in Low/Medium WLTP
+        v_eco = trip_df['Speed[m/s]'].clip(upper=12.0)
+        
+        # FAST: 20% faster than recorded, capped at 30 m/s (~108 km/h)
+        v_fast = (trip_df['Speed[m/s]'] * 1.2).clip(upper=30.0) 
+        
+        # --- INTERPOLATE SPEED ---
+        # Blend the two speeds based on alpha. 
+        # lower=1.0 ensures we don't divide by zero when calculating time.
+        sim_speed = (alpha * v_fast + (1 - alpha) * v_eco).clip(lower=1.0)
+        
+        # --- CALCULATE METRICS ---
+        sim_time = trip_df['dist_meters'] / sim_speed
+        
+        # Get CO2 rates for every segment based on simulated speed
+        # We use a list comprehension since get_iso_emission_rate is applied row-by-row
+        co2_rates = [get_iso_emission_rate(s, group=emission_group) for s in sim_speed]
+        sim_emissions = (trip_df['dist_meters'] / 1000.0) * co2_rates
+        
+        # Aggregate totals
+        results.append({
+            'Profile_Name': f"Profile {i+1}",
+            'Type': 'Eco' if alpha == 0 else 'Fast' if alpha == 1 else 'Mixed',
+            'Alpha': round(alpha, 2),
+            'Time (s)': round(sim_time.sum(), 2),
+            'CO2 (g)': round(sum(sim_emissions), 2)
+        })
+        
+    return pd.DataFrame(results)
+
+# --- EXECUTE THE TEST ---
+# Test with the Rotenburg trip
+rotenburg_trip = "germany_2024_06_14_Passat Variant TSI_10_14_10_28_abb4c15a-83dc-4376-9711-1b718843ee98.csv"
+
+# You can easily change n here!
+n = 100
+df_results = simulate_trip_profiles(rotenburg_trip, n_profiles=n)
+
+print("\n--- Simulation Results ---")
+print(df_results.to_string(index=False))
+
+# --- VISUALIZE THE PARETO SETUP ---
+plt.figure(figsize=(8, 5))
+# We plot Time vs CO2. We want MINIMUM Time (left) and MINIMUM CO2 (bottom)
+plt.plot(df_results['Time (s)'], df_results['CO2 (g)'], marker='o', linestyle='-', color='b')
+
+# Annotate the points
+for i, row in df_results.iterrows():
+    plt.text(row['Time (s)'], row['CO2 (g)'], f" {row['Profile_Name']}", fontsize=9)
+
+plt.title(f"Time vs Emissions Trade-off ({n} Profiles)")
+plt.xlabel("Total Travel Time (seconds)")
+plt.ylabel("Total CO2 Emissions (grams)")
+plt.grid(True, linestyle='--', alpha=0.6)
+plt.show()
