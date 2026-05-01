@@ -57,3 +57,13 @@ def get_iso_emission_rate(speed_ms, group='low'):
     if not match.empty:
         return match.iloc[0]['co2_per_km']
     return calib['co2_per_km'].mean()
+
+def get_path_metrics(G, path):
+    totals = {'distance': 0.0, 'time': 0.0, 'emissions': 0.0}
+    for i in range(len(path) - 1):
+        u, v = path[i], path[i+1]
+        edge_data = G[u][v]
+        totals['distance'] += edge_data['distance']
+        totals['time'] += edge_data['time']
+        totals['emissions'] += edge_data['emissions']
+    return totals
