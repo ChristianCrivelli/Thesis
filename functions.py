@@ -1,6 +1,7 @@
 import pandas as pd
 import networkx as nx
 import numpy as np
+import requests
 
 # load csv
 data = pd.read_csv('combined_trips.csv')
@@ -67,3 +68,35 @@ def get_path_metrics(G, path):
         totals['time'] += edge_data['time']
         totals['emissions'] += edge_data['emissions']
     return totals
+
+def get_elevation(lats, lons):
+    chunk_size = 1000
+    all_elevations = []
+
+    for i in range(0, len(lats), chunk_size):
+        lat_chunk = lats[i:i+chunk_size]
+        lon_chunk = lons[i:i+chunk_size]
+        
+        # Convert lists to comma-separated strings for the URL
+        lat_str = ",".join(map(str, lat_chunk))
+        lon_str = ",".join(map(str, lon_chunk))
+        
+        url = f"https://api.open-meteo.com/v1/elevation?latitude={lat_str}&longitude={lon_str}"
+        
+        try:
+            response = requests.get(url)
+            response.raise_for_status() # Check for HTTP errors
+            data = response.json()
+            
+            # Append the list of elevations from this chunk
+            if 'elevation' in data:
+                all_elevations.extend(data['elevation'])
+            else:
+                print("Warning: No elevation data found in response. Using 0.")
+                all_elevations.extend([0] * len(lat_chunk))
+                
+        except Exception as e:
+            print(f"API Error: {e}. Defaulting chunk to 0 elevation.")
+            all_elevations.extend([0] * len(lat_chunk))
+            
+    return all_elevations
