@@ -1,87 +1,121 @@
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
+from functions import get_iso_emission_rate
 
-from functions import get_iso_emission_rate, get_elevation
+# --- Config ---
+DATA_FILE = 'combined_trips.csv'
+data = pd.read_csv(DATA_FILE)
 
-#import data
-data = pd.read_csv('combined_trips.csv')
-trips = {
-    "Rotenburg": "germany_2024_06_14_Passat Variant TSI_10_14_10_28_abb4c15a-83dc-4376-9711-1b718843ee98.csv",
-    "Frankfurt": "germany_2025_10_30_Passat Variant TSI_19_33_19_46_2d2961c1-2e11-40b2-86f4-a55b1ca872bf.csv",
-    "Stuttgart": "germany_2022_07_12_rg.samsung_07_46_07_58_2eca8f6d-d6b6-45bc-aa4a-7cd5615d0b0b.csv",
-    "Oranjestad": "aruba_2025_10_21_dt885_19_27_12_26_4812fcb0-c0eb-4c74-958d-9b12a177181b",
-    "Bubali": "aruba_2025_11_06_dt170_19_01_01_22_bb6f0a40-d888-4d53-b636-b5a8c044ba3b"
-}
+# PoD tuning constants (ISO 23795-3 / Newtonian)
+ACCEL_THRESHOLD  = 0.5   # m/s² — above this, apply inertia penalty
+ACCEL_PENALTY_K  = 0.8   # penalty scale per m/s² above threshold
+GRADE_WEIGHT     = 5.0   # hill penalty scale (tunable)
+GRADE_MIN_FACTOR = 0.5   # minimum fuel factor downhill (not zero — engine still runs)
 
-# simulation function
-def simulate(trip_id, n_profiles=5):
-    print(f"Running High-Fidelity Simulation for {trip_id[:20]}...")
-    
-    trip_df = data[data['trip'] == trip_id].sort_values('Time[ms]').copy()
-    
-    # Calculate Distance
+
+def simulate(trip_id, n_profiles=10):
+    """
+    Simulate n driving profiles ranging from eco (alpha=0) to aggressive (alpha=1).
+
+    Each profile blends:
+      - eco speed  : recorded speed clipped to 12 m/s (~43 km/h)
+      - fast speed : recorded speed * 1.2, clipped to 30 m/s (~108 km/h)
+
+    CO2 is calculated per segment using:
+      1. Baseline rate from WLTP class lookup (kg CO2/km)
+      2. PoD acceleration penalty (inertia force)
+      3. PoD grade penalty (slope resistance)
+
+    Units throughout:
+      distance  → metres  (converted to km for CO2 calc)
+      time      → seconds
+      CO2       → grams   (calibration is kg/km → converted here)
+    """
+    print(f"\nSimulating: {trip_id[:50]}...")
+
+    trip_df = (
+        data[data['trip'] == trip_id]
+        .sort_values('Time[ms]')
+        .copy()
+        .reset_index(drop=True)
+    )
+
+    if trip_df.empty:
+        raise ValueError(f"Trip '{trip_id}' not found in dataset.")
+
+    # --- 1. Segment distances (Euclidean, degrees → metres) ---
     trip_df['next_lat'] = trip_df['Latitude'].shift(-1)
     trip_df['next_lon'] = trip_df['Longitude'].shift(-1)
-    trip_df['dist_meters'] = np.sqrt(
-        (trip_df['Latitude'] - trip_df['next_lat'])**2 + 
-        (trip_df['Longitude'] - trip_df['next_lon'])**2
-    ) * 111320
-    
-    # --- NEW: CALCULATE ROAD GRADE ---
-    trip_df['elevation'] = trip_df.apply(lambda row: get_elevation(row['Latitude'], row['Longitude']), axis=1)
+    trip_df['dist_m'] = (
+        np.sqrt(
+            (trip_df['Latitude']  - trip_df['next_lat'])**2 +
+            (trip_df['Longitude'] - trip_df['next_lon'])**2
+        ) * 111_320
+    )
+
+    # --- 2. Road grade via elevation API (vectorised — one call for whole trip) ---
+    trip_df['elevation'] = trip_df['Altitude']
     trip_df['next_elevation'] = trip_df['elevation'].shift(-1)
-    trip_df['delta_elevation'] = trip_df['next_elevation'] - trip_df['elevation']
-    
-    # Grade = rise / run (capped between -10% and +10% to prevent extreme outliers)
-    trip_df['grade'] = (trip_df['delta_elevation'] / trip_df['dist_meters']).clip(-0.10, 0.10)
-    
-    trip_df = trip_df.dropna(subset=['dist_meters'])
-    emission_group = trip_df['emission_group'].iloc[0] if 'emission_group' in trip_df.columns else 'low'
+    trip_df['delta_elev']     = trip_df['next_elevation'] - trip_df['elevation']
+
+    # grade = rise/run, capped at ±10 % to avoid GPS noise blowup
+    trip_df['grade'] = (trip_df['delta_elev'] / trip_df['dist_m']).clip(-0.10, 0.10)
+
+    # Drop the last row (no next point → NaN distances/grades)
+    trip_df = trip_df.dropna(subset=['dist_m', 'grade']).copy()
+
+    emission_group = (
+        trip_df['emission_group'].iloc[0]
+        if 'emission_group' in trip_df.columns
+        else 'low'
+    )
+
+    # Pre-compute grade penalty — same for all profiles (road doesn't change)
+    grade_penalty = (1.0 + trip_df['grade'].values * GRADE_WEIGHT).clip(min=GRADE_MIN_FACTOR)
 
     results = []
-    alphas = np.linspace(0, 1, n_profiles)
-    
-    for i, alpha in enumerate(alphas):
-        # 1. Simulate Speeds
-        v_eco = trip_df['Speed[m/s]'].clip(upper=12.0)
-        v_fast = (trip_df['Speed[m/s]'] * 1.2).clip(upper=30.0) 
-        sim_speed = (alpha * v_fast + (1 - alpha) * v_eco).clip(lower=0.1) # Avoid true zero for time division
-        
-        # --- NEW: CALCULATE ACCELERATION ---
-        # dt = time to cover the distance at the simulated speed
-        sim_dt = trip_df['dist_meters'] / sim_speed 
-        
-        # dv = difference in speed to the next point
-        next_speed = sim_speed.shift(-1).fillna(sim_speed)
-        sim_acceleration = (next_speed - sim_speed) / sim_dt
-        
-        # 2. Get Baseline CO2
-        base_co2_rates = [get_iso_emission_rate(s, group=emission_group) for s in sim_speed]
-        
-        # --- NEW: APPLY PoD PENALTIES (Inertia + Gravity) ---
-        # If accelerating rapidly (e.g., > 0.5 m/s^2), increase CO2 rate
-        accel_penalty = np.where(sim_acceleration > 0.5, 1 + (sim_acceleration * 0.8), 1.0)
-        
-        # If going uphill (grade > 0), increase CO2. Downhill allows coasting.
-        grade_penalty = 1 + (trip_df['grade'] * 5) # 5 is a tuning weight for how much hills hurt
-        grade_penalty = grade_penalty.clip(lower=0.5) # You never use 0 fuel downhill unless it's an EV
-        
-        # Combine the penalties
-        final_co2_rates = base_co2_rates * accel_penalty * grade_penalty
-        
-        # Calculate totals
-        sim_emissions = (trip_df['dist_meters'] / 1000.0) * final_co2_rates
-        
-        results.append({
-            'Profile_Name': f"Profile {i+1}",
-            'Alpha': round(alpha, 2),
-            'Time (s)': round(sim_dt.sum(), 2),
-            'CO2 (g)': round(sum(sim_emissions), 2)
-        })
-        
-    return pd.DataFrame(results)
 
-# Run the test
-df_hf_results = simulate("germany_2024_06_14_Passat Variant TSI_10_14_10_28_abb4c15a-83dc-4376-9711-1b718843ee98.csv", n_profiles=10)
-print(df_hf_results.to_string(index=False))
+    for i, alpha in enumerate(np.linspace(0, 1, n_profiles)):
+
+        # --- 3. Simulated speed profile ---
+        v_eco  = trip_df['Speed[m/s]'].clip(upper=12.0)
+        v_fast = (trip_df['Speed[m/s]'] * 1.2).clip(upper=30.0)
+        sim_speed = ((alpha * v_fast) + ((1 - alpha) * v_eco)).clip(lower=0.1)
+
+        # --- 4. Segment travel time ---
+        sim_dt = trip_df['dist_m'].values / sim_speed.values   # seconds
+
+        # --- 5. Acceleration (PoD: inertia force proxy) ---
+        next_speed   = np.roll(sim_speed.values, -1)
+        next_speed[-1] = sim_speed.values[-1]                  # last point: no change
+        sim_accel    = (next_speed - sim_speed.values) / np.where(sim_dt > 0, sim_dt, 1e-6)
+
+        accel_penalty = np.where(
+            sim_accel > ACCEL_THRESHOLD,
+            1.0 + (sim_accel - ACCEL_THRESHOLD) * ACCEL_PENALTY_K,
+            1.0
+        )
+
+        # --- 6. Baseline CO2 rates from WLTP lookup (kg/km) ---
+        base_co2_kg_per_km = np.array([
+            get_iso_emission_rate(s, group=emission_group)
+            for s in sim_speed.values
+        ])
+
+        # --- 7. Final CO2 per segment (grams) ---
+        # dist in km × base_rate (kg/km) × penalties × 1000 → grams
+        dist_km        = trip_df['dist_m'].values / 1000.0
+        final_co2_g    = dist_km * base_co2_kg_per_km * accel_penalty * grade_penalty * 1000.0
+
+        results.append({
+            'Profile':   f"Profile {i+1:02d}",
+            'Alpha':     round(float(alpha), 2),
+            'Time (s)':  round(float(sim_dt.sum()), 1),
+            'Dist (km)': round(float(dist_km.sum()), 3),
+            'CO2 (g)':   round(float(final_co2_g.sum()), 1),
+        })
+
+    df = pd.DataFrame(results)
+    df['g CO2/km'] = (df['CO2 (g)'] / df['Dist (km)']).round(1)
+
+    return df
