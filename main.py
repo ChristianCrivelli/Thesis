@@ -9,9 +9,8 @@ trips = {
 }
 
 # Manual Run
-trip_name = "Rotenburg"
-TRIP_ID = trips[trip_name]
-df_results = simulate(TRIP_ID, n_profiles=100)
-print(df_results.to_string(index=False))
-df_results.to_csv(f'simulation_{trip_name.lower()}.csv', index=False)
-print("Results saved to simulation_results.csv")
+for trip in trips:
+    TRIP_ID = trips[trip]
+    df_results = simulate(TRIP_ID, n_profiles=100)
+    print(df_results.to_string(index=False))
+    df_results.to_csv(f'simulation_{trip.lower()}.csv', index=False)

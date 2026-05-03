@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Trip Visualizer</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;700;800&display=swap');
+
+  :root {
+    --bg:       #0d0f14;
+    --surface:  #151820;
+    --border:   #252a35;
+    --text:     #e8eaf0;
+    --muted:    #6b7280;
+    --accent:   #f0c040;
+    --stop-col: #ff4d6d;
+    --track-col:#4da6ff;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Syne', sans-serif;
+    height: 100vh;
+    display: grid;
+    grid-template-rows: auto 1fr;
+    grid-template-columns: 320px 1fr;
+    grid-template-areas:
+      "header header"
+      "sidebar map";
+  }
+
+  header {
+    grid-area: header;
+    padding: 18px 28px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+    background: var(--surface);
+  }
+
+  header h1 {
+    font-size: 1.25rem;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+
+  header span {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.7rem;
+    color: var(--muted);
+    letter-spacing: 0.04em;
+  }
+
+  #sidebar {
+    grid-area: sidebar;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+    padding: 20px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .section-label {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.62rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding: 0 4px 6px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 2px;
+  }
+
+  .trip-card {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px 14px;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .trip-card:hover { border-color: var(--accent); background: #1a1e28; }
+  .trip-card.active { border-color: var(--accent); background: #1e2130; }
+
+  .trip-card .dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+    margin-right: 8px;
+    flex-shrink: 0;
+  }
+
+  .trip-card .name {
+    font-weight: 700;
+    font-size: 0.9rem;
+    display: flex;
+    align-items: center;
+  }
+
+  .trip-card .meta {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.65rem;
+    color: var(--muted);
+    margin-top: 6px;
+    line-height: 1.7;
+  }
+
+  .trip-card .meta b { color: var(--text); }
+
+  .stop-badge {
+    display: inline-block;
+    background: #ff4d6d22;
+    color: var(--stop-col);
+    border: 1px solid #ff4d6d44;
+    border-radius: 3px;
+    padding: 1px 6px;
+    font-family: 'Space Mono', monospace;
+    font-size: 0.6rem;
+    font-weight: 700;
+    margin-top: 6px;
+  }
+
+  #upload-area {
+    border: 1px dashed var(--border);
+    border-radius: 6px;
+    padding: 20px 14px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.15s;
+  }
+  #upload-area:hover { border-color: var(--accent); }
+  #upload-area p { font-size: 0.78rem; color: var(--muted); line-height: 1.6; }
+  #upload-area .icon { font-size: 1.4rem; margin-bottom: 6px; }
+  #csv-input { display: none; }
+
+  #legend {
+    margin-top: auto;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+  }
+
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    font-size: 0.75rem;
+    color: var(--muted);
+  }
+
+  .legend-line {
+    width: 24px; height: 3px;
+    border-radius: 2px;
+    background: var(--track-col);
+  }
+
+  .legend-dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+  }
+
+  #map {
+    grid-area: map;
+    background: #0a0c10;
+  }
+
+  /* Loading overlay */
+  #loading {
+    position: fixed; inset: 0;
+    background: var(--bg);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 12px;
+    z-index: 9999;
+    transition: opacity 0.3s;
+  }
+  #loading.hidden { opacity: 0; pointer-events: none; }
+  #loading p { font-family: 'Space Mono', monospace; font-size: 0.75rem; color: var(--muted); }
+  .spinner {
+    width: 32px; height: 32px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .leaflet-container { background: #0d0f14 !important; }
+</style>
+</head>
+<body>
+
+<div id="loading">
+  <div class="spinner"></div>
+  <p>Initialising map…</p>
+</div>
+
+<header>
+  <h1>Trip Visualiser</h1>
+  <span>CO₂ simulation · stop detection · route analysis</span>
+</header>
+
+<div id="sidebar">
+  <div class="section-label">Load data</div>
+
+  <div id="upload-area" onclick="document.getElementById('csv-input').click()">
+    <div class="icon">📂</div>
+    <p>Click to load <b>combined_trips.csv</b><br>or any trip CSV</p>
+  </div>
+  <input type="file" id="csv-input" accept=".csv" multiple/>
+
+  <div class="section-label" style="margin-top:8px">Trips</div>
+  <div id="trip-list"></div>
+
+  <div id="legend">
+    <div class="section-label">Legend</div>
+    <div class="legend-item">
+      <div class="legend-line"></div>
+      <span>Trip route</span>
+    </div>
+    <div class="legend-item">
+      <div class="legend-dot" style="background:var(--stop-col)"></div>
+      <span>Stop event</span>
+    </div>
+    <div class="legend-item">
+      <div class="legend-dot" style="background:#00e676; width:12px;height:12px;border-radius:3px"></div>
+      <span>Trip start</span>
+    </div>
+    <div class="legend-item">
+      <div class="legend-dot" style="background:var(--accent); width:12px;height:12px;border-radius:3px"></div>
+      <span>Trip end</span>
+    </div>
+  </div>
+</div>
+
+<div id="map"></div>
+
+<script>
+// ── Constants (mirror simulations.py) ──────────────────────────────────────
+const STOP_SPEED_THRESHOLD = 0.5;   // m/s
+const MIN_STOP_DURATION_S  = 2.0;   // seconds
+
+// Palette for multiple trips
+const TRIP_COLORS = [
+  '#4da6ff','#a78bfa','#34d399','#fb923c','#f472b6',
+  '#38bdf8','#facc15','#4ade80','#f87171','#c084fc'
+];
+
+// ── Map setup ───────────────────────────────────────────────────────────────
+const map = L.map('map', { zoomControl: false, attributionControl: false });
+L.control.zoom({ position: 'topright' }).addTo(map);
+L.control.attribution({ position: 'bottomright', prefix: false })
+  .addTo(map)
+  .setPrefix('© OpenStreetMap');
+
+L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+  maxZoom: 19,
+  attribution: '© OpenStreetMap © CARTO'
+}).addTo(map);
+
+map.setView([20, 0], 2);
+
+// Hide loading once map tiles start
+map.once('load', () => document.getElementById('loading').classList.add('hidden'));
+setTimeout(() => document.getElementById('loading').classList.add('hidden'), 800);
+
+// ── State ────────────────────────────────────────────────────────────────────
+let tripData   = {};   // name → { rows, color, layer }
+let colorIndex = 0;
+let activeLayers = [];
+
+// ── Stop detection (mirrors simulations.py logic) ───────────────────────────
+function detectStops(rows) {
+  const stops = [];
+  let inStop = false, startI = null, startTime = null;
+
+  for (let i = 0; i < rows.length; i++) {
+    const speed   = parseFloat(rows[i]['Speed[m/s]'] ?? 0);
+    const timeMs  = parseFloat(rows[i]['Time[ms]']   ?? 0);
+    const stopped = speed < STOP_SPEED_THRESHOLD;
+
+    if (stopped && !inStop) {
+      inStop = true; startI = i; startTime = timeMs;
+    } else if (!stopped && inStop) {
+      const dur = (parseFloat(rows[i-1]['Time[ms]']) - startTime) / 1000;
+      if (dur >= MIN_STOP_DURATION_S) {
+        stops.push({ index: startI, duration_s: dur, row: rows[startI] });
+      }
+      inStop = false;
+    }
+  }
+  // Trip ends while stopped
+  if (inStop) {
+    const dur = (parseFloat(rows[rows.length-1]['Time[ms]']) - startTime) / 1000;
+    if (dur >= MIN_STOP_DURATION_S) {
+      stops.push({ index: startI, duration_s: dur, row: rows[startI] });
+    }
+  }
+  return stops;
+}
+
+// ── Trip stats ───────────────────────────────────────────────────────────────
+function tripStats(rows) {
+  let dist = 0;
+  for (let i = 0; i < rows.length - 1; i++) {
+    dist += haversine(
+      +rows[i].Latitude, +rows[i].Longitude,
+      +rows[i+1].Latitude, +rows[i+1].Longitude
+    );
+  }
+  const t0 = +rows[0]['Time[ms]'], t1 = +rows[rows.length-1]['Time[ms]'];
+  return { dist_km: (dist/1000).toFixed(2), dur_s: ((t1-t0)/1000).toFixed(0) };
+}
+
+function haversine(lat1, lon1, lat2, lon2) {
+  const R = 6371000;
+  const p1 = lat1*Math.PI/180, p2 = lat2*Math.PI/180;
+  const dp = (lat2-lat1)*Math.PI/180, dl = (lon2-lon1)*Math.PI/180;
+  const a  = Math.sin(dp/2)**2 + Math.cos(p1)*Math.cos(p2)*Math.sin(dl/2)**2;
+  return 2*R*Math.asin(Math.sqrt(a));
+}
+
+// ── Render trip on map ───────────────────────────────────────────────────────
+function renderTrip(name) {
+  const { rows, color } = tripData[name];
+
+  // Clear existing layer for this trip
+  if (tripData[name].layer) map.removeLayer(tripData[name].layer);
+
+  const group = L.layerGroup();
+
+  // Route polyline
+  const coords = rows.map(r => [+r.Latitude, +r.Longitude]);
+  L.polyline(coords, { color, weight: 3, opacity: 0.85 }).addTo(group);
+
+  // Start marker
+  const startIcon = L.divIcon({
+    html: `<div style="width:12px;height:12px;background:#00e676;border-radius:3px;border:2px solid #fff;transform:rotate(45deg)"></div>`,
+    className: '', iconAnchor: [6,6]
+  });
+  L.marker(coords[0], { icon: startIcon })
+    .bindPopup(`<b>${name}</b><br>Start`)
+    .addTo(group);
+
+  // End marker
+  const endIcon = L.divIcon({
+    html: `<div style="width:12px;height:12px;background:#f0c040;border-radius:3px;border:2px solid #fff;transform:rotate(45deg)"></div>`,
+    className: '', iconAnchor: [6,6]
+  });
+  L.marker(coords[coords.length-1], { icon: endIcon })
+    .bindPopup(`<b>${name}</b><br>End`)
+    .addTo(group);
+
+  // Stop markers
+  const stops = detectStops(rows);
+  stops.forEach((s, idx) => {
+    const lat = +s.row.Latitude, lon = +s.row.Longitude;
+    const stopIcon = L.divIcon({
+      html: `<div style="width:10px;height:10px;background:#ff4d6d;border-radius:50%;border:2px solid #fff;box-shadow:0 0 6px #ff4d6d88"></div>`,
+      className: '', iconAnchor: [5,5]
+    });
+    L.marker([lat, lon], { icon: stopIcon })
+      .bindPopup(`
+        <div style="font-family:'Space Mono',monospace;font-size:11px;line-height:1.8">
+          <b style="font-size:13px">${name} · Stop #${idx+1}</b><br>
+          Duration: <b>${s.duration_s.toFixed(1)} s</b><br>
+          Lat: ${lat.toFixed(5)}<br>
+          Lon: ${lon.toFixed(5)}
+        </div>
+      `)
+      .addTo(group);
+  });
+
+  tripData[name].layer = group;
+  tripData[name].stops = stops;
+  group.addTo(map);
+
+  return stops.length;
+}
+
+// ── Sidebar card ─────────────────────────────────────────────────────────────
+function addTripCard(name) {
+  const { color, rows } = tripData[name];
+  const stats  = tripStats(rows);
+  const nStops = tripData[name].stops?.length ?? 0;
+
+  const card = document.createElement('div');
+  card.className = 'trip-card active';
+  card.dataset.name = name;
+  card.innerHTML = `
+    <div class="name">
+      <span class="dot" style="background:${color}"></span>${name}
+    </div>
+    <div class="meta">
+      dist &nbsp;<b>${stats.dist_km} km</b><br>
+      time &nbsp;<b>${stats.dur_s} s</b><br>
+      pts &nbsp;&nbsp;<b>${rows.length}</b>
+    </div>
+    ${nStops > 0 ? `<div class="stop-badge">⬤ ${nStops} stop${nStops>1?'s':''}</div>` : ''}
+  `;
+
+  card.addEventListener('click', () => {
+    const isActive = card.classList.contains('active');
+    if (isActive) {
+      card.classList.remove('active');
+      if (tripData[name].layer) map.removeLayer(tripData[name].layer);
+    } else {
+      card.classList.add('active');
+      tripData[name].layer.addTo(map);
+    }
+    fitVisible();
+  });
+
+  document.getElementById('trip-list').appendChild(card);
+}
+
+function fitVisible() {
+  const allCoords = Object.values(tripData)
+    .filter(t => t.layer && map.hasLayer(t.layer))
+    .flatMap(t => t.rows.map(r => [+r.Latitude, +r.Longitude]));
+  if (allCoords.length) map.fitBounds(L.latLngBounds(allCoords), { padding: [40,40] });
+}
+
+// ── CSV parsing ──────────────────────────────────────────────────────────────
+function loadCSV(file) {
+  Papa.parse(file, {
+    header: true,
+    skipEmptyLines: true,
+    complete: ({ data }) => {
+      if (!data.length) return;
+
+      // Group by 'trip' column if present, otherwise treat whole file as one trip
+      const hasTripCol = 'trip' in data[0];
+      const groups = {};
+
+      if (hasTripCol) {
+        data.forEach(row => {
+          const key = row.trip ?? 'unknown';
+          if (!groups[key]) groups[key] = [];
+          groups[key].push(row);
+        });
+      } else {
+        groups[file.name.replace('.csv','')] = data;
+      }
+
+      Object.entries(groups).forEach(([tripId, rows]) => {
+        // Derive a short display name from the trip ID
+        const parts  = tripId.split('_');
+        const city   = parts[0] ?? tripId;
+        const date   = parts[1] ?? '';
+        const dispName = date ? `${capitalise(city)} ${date}` : capitalise(city);
+
+        const color = TRIP_COLORS[colorIndex++ % TRIP_COLORS.length];
+        tripData[dispName] = { rows, color, layer: null };
+
+        renderTrip(dispName);
+        addTripCard(dispName);
+      });
+
+      fitVisible();
+    }
+  });
+}
+
+function capitalise(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
+
+// ── File input handler ───────────────────────────────────────────────────────
+document.getElementById('csv-input').addEventListener('change', e => {
+  [...e.target.files].forEach(loadCSV);
+  e.target.value = '';
+});
+</script>
+</body>
+</html>
